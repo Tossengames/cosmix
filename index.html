@@ -1563,6 +1563,75 @@ function onFirstInteraction(){
 // Restore gallery
 renderGallery();
 
+
+// ══════════════════════════════════════════
+//  CANVAS MEDIA RECORDER — for GitHub Action
+// ══════════════════════════════════════════
+window._recorderChunks = [];
+window._recorder = null;
+window._recordingBlob = null;
+window._recordingDone = false;
+
+window.startRecording = function(fps){
+  fps = fps || 30;
+  ensureAC();
+  resumeAC();
+
+  // Canvas video stream
+  const videoStream = canvas.captureStream(fps);
+
+  // Audio stream from Web Audio master output
+  let combinedStream;
+  try{
+    const audioDest = AC.createMediaStreamDestination();
+    masterGain.connect(audioDest);
+    const audioStream = audioDest.stream;
+    const tracks = [...videoStream.getTracks(), ...audioStream.getTracks()];
+    combinedStream = new MediaStream(tracks);
+  } catch(e){
+    combinedStream = videoStream;
+  }
+
+  window._recorderChunks = [];
+  window._recordingDone = false;
+  window._recordingBlob = null;
+
+  const options = { mimeType: 'video/webm;codecs=vp9,opus' };
+  let mr;
+  try{ mr = new MediaRecorder(combinedStream, options); }
+  catch(e){
+    try{ mr = new MediaRecorder(combinedStream, { mimeType: 'video/webm' }); }
+    catch(e2){ mr = new MediaRecorder(combinedStream); }
+  }
+
+  mr.ondataavailable = e => { if(e.data && e.data.size > 0) window._recorderChunks.push(e.data); };
+  mr.onstop = () => {
+    window._recordingBlob = new Blob(window._recorderChunks, { type: 'video/webm' });
+    window._recordingDone = true;
+  };
+
+  mr.start(100); // collect chunk every 100ms
+  window._recorder = mr;
+  console.log('Recording started');
+};
+
+window.stopRecording = function(){
+  if(window._recorder && window._recorder.state !== 'inactive'){
+    window._recorder.stop();
+    console.log('Recording stopped');
+  }
+};
+
+window.getRecordingBase64 = function(){
+  return new Promise((resolve, reject) => {
+    if(!window._recordingBlob){ reject('No blob'); return; }
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(window._recordingBlob);
+  });
+};
+
 // ── INIT ──────────────────────────────────────────────
 resize();
 randomiseAll();
