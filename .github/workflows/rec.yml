@@ -63,10 +63,9 @@ jobs:
 
       - name: Start Xvfb
         run: |
-          Xvfb :99 -screen 0 1920x1080x24 -ac &
+          Xvfb :99 -screen 0 390x844x24 -ac &
           echo "DISPLAY=:99" >> $GITHUB_ENV
           sleep 3
-          echo "Xvfb ready"
 
       - name: Start PulseAudio
         run: |
@@ -78,7 +77,6 @@ jobs:
           sleep 1
           pactl set-default-sink vsink
           pactl set-default-source vsink.monitor
-          echo "PulseAudio ready"
 
       - name: Record COSMIX
         run: |
@@ -104,8 +102,9 @@ jobs:
           opts.add_argument("--no-sandbox")
           opts.add_argument("--disable-dev-shm-usage")
           opts.add_argument("--disable-gpu")
-          opts.add_argument("--window-size=1920,1080")
+          opts.add_argument("--window-size=390,844")
           opts.add_argument("--window-position=0,0")
+          opts.add_argument("--force-device-scale-factor=1")
           opts.add_argument("--autoplay-policy=no-user-gesture-required")
           opts.add_argument("--disable-backgrounding-occluded-windows")
           opts.add_argument("--disable-renderer-backgrounding")
@@ -115,33 +114,31 @@ jobs:
           opts.add_argument("--disable-extensions")
           opts.add_argument("--disable-infobars")
           opts.add_argument("--disable-notifications")
+          opts.add_experimental_option("mobileEmulation", {
+            "deviceMetrics": {
+              "width": 390,
+              "height": 844,
+              "pixelRatio": 1.0
+            },
+            "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+          })
 
-          print("Starting Chrome...")
           driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),
             options=opts
           )
-          driver.set_window_size(1920, 1080)
-
-          print(f"Loading {site_url}")
+          driver.set_window_size(390, 844)
           driver.get(site_url)
 
-          print("Waiting for start-btn...")
-          wait = WebDriverWait(driver, 30)
-          wait.until(EC.presence_of_element_located((By.ID, "start-btn")))
-          print("start-btn found")
+          WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.ID, "start-btn"))
+          )
           time.sleep(2)
 
-          print("Clicking start-btn...")
           driver.execute_script("document.getElementById('start-btn').click();")
           time.sleep(0.5)
           driver.execute_script("startExperience();")
-          time.sleep(0.5)
-
-          splash_hidden = driver.execute_script(
-            "return document.getElementById('splash').classList.contains('hidden');"
-          )
-          print(f"Splash hidden: {splash_hidden}")
+          time.sleep(1)
 
           driver.execute_script("spawnBurst();")
           time.sleep(0.5)
@@ -149,13 +146,11 @@ jobs:
           time.sleep(0.5)
 
           driver.save_screenshot("/tmp/screen_before_record.png")
-          print("Screenshot saved")
 
-          print(f"Starting recording {duration}s...")
           ffmpeg = subprocess.Popen([
             "ffmpeg", "-y",
             "-f", "x11grab",
-            "-video_size", "1920x1080",
+            "-video_size", "390x844",
             "-framerate", "30",
             "-i", ":99.0+0,0",
             "-f", "pulse",
@@ -173,14 +168,17 @@ jobs:
           ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
           for i in range(duration):
-            driver.execute_script(f"""
-              handleInteraction(
-                {random.randint(100, 1820)},
-                {random.randint(100, 980)}
-              );
-            """)
-            if i == duration // 2:
-              driver.execute_script("spawnBurst();")
+            try:
+              driver.execute_script(f"""
+                handleInteraction(
+                  {random.randint(20, 370)},
+                  {random.randint(50, 800)}
+                );
+              """)
+              if i == duration // 2:
+                driver.execute_script("spawnBurst();")
+            except:
+              pass
             time.sleep(1)
 
           time.sleep(2)
@@ -190,14 +188,13 @@ jobs:
           ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
 
           if not ok:
-            print("Audio failed, retrying video only...")
             print(stderr[-800:])
             if os.path.exists(output_file):
               os.remove(output_file)
             ffmpeg2 = subprocess.Popen([
               "ffmpeg", "-y",
               "-f", "x11grab",
-              "-video_size", "1920x1080",
+              "-video_size", "390x844",
               "-framerate", "30",
               "-i", ":99.0+0,0",
               "-c:v", "libx264",
