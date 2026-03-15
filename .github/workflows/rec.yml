@@ -22,7 +22,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: apt-ubuntu22-cosmix-v8
+          key: apt-ubuntu22-cosmix-v10
 
       - name: Install dependencies
         run: |
@@ -33,7 +33,6 @@ jobs:
             pulseaudio \
             pulseaudio-utils \
             chromium-browser \
-            xdotool \
             libnss3 \
             libgbm1 \
             libasound2 \
@@ -43,7 +42,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-cosmix-v4
+          key: pip-cosmix-v6
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -57,7 +56,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.wdm
-          key: wdm-ubuntu22-v4
+          key: wdm-ubuntu22-v6
 
       - name: Set timestamp
         run: echo "TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
@@ -73,29 +72,25 @@ jobs:
         run: |
           pulseaudio --kill 2>/dev/null || true
           sleep 1
-          pulseaudio \
-            --start \
-            --exit-idle-time=-1 \
-            --log-target=syslog \
-            --log-level=error 2>/dev/null || true
+          pulseaudio --start --exit-idle-time=-1 --log-level=error 2>/dev/null || true
           sleep 3
-          pactl load-module module-null-sink \
-            sink_name=vsink \
-            sink_properties=device.description=VirtualSpeaker
+          pactl load-module module-null-sink sink_name=vsink sink_properties=device.description=VirtualSpeaker
           sleep 1
           pactl set-default-sink vsink
           pactl set-default-source vsink.monitor
-          sleep 1
-          echo "=== Default sink ==="
-          pactl info | grep "Default Sink"
-          echo "=== Default source ==="
-          pactl info | grep "Default Source"
           echo "PulseAudio ready"
 
       - name: Record COSMIX
         run: |
           python3 << 'PYEOF'
           import os, time, subprocess, random
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.chrome.service import Service
+          from selenium.webdriver.support.ui import WebDriverWait
+          from selenium.webdriver.support import expected_conditions as EC
+          from selenium.webdriver.common.by import By
+          from webdriver_manager.chrome import ChromeDriverManager
 
           duration    = int(os.environ.get("DURATION", "10"))
           ts          = os.environ.get("TS", "test")
@@ -104,47 +99,59 @@ jobs:
 
           env = os.environ.copy()
           env["DISPLAY"] = ":99"
-          env["PULSE_SERVER"] = "unix:/run/user/1001/pulse/native"
 
-          # ── Launch Chrome ──
-          print("Launching Chrome...")
-          chrome = subprocess.Popen([
-            "chromium-browser",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--window-size=1920,1080",
-            "--window-position=0,0",
-            "--autoplay-policy=no-user-gesture-required",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            "--disable-background-timer-throttling",
-            "--disable-background-media-suspend",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-extensions",
-            "--disable-infobars",
-            "--disable-notifications",
-            "--alsa-output-device=pulse",
-            f"--app={site_url}",
-          ], env=env, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+          opts = Options()
+          opts.add_argument("--no-sandbox")
+          opts.add_argument("--disable-dev-shm-usage")
+          opts.add_argument("--disable-gpu")
+          opts.add_argument("--window-size=1920,1080")
+          opts.add_argument("--window-position=0,0")
+          opts.add_argument("--autoplay-policy=no-user-gesture-required")
+          opts.add_argument("--disable-backgrounding-occluded-windows")
+          opts.add_argument("--disable-renderer-backgrounding")
+          opts.add_argument("--disable-background-timer-throttling")
+          opts.add_argument("--disable-background-media-suspend")
+          opts.add_argument("--no-first-run")
+          opts.add_argument("--disable-extensions")
+          opts.add_argument("--disable-infobars")
+          opts.add_argument("--disable-notifications")
 
-          # ── Wait 5 seconds for page load ──
-          print("Waiting for page load (5s)...")
-          time.sleep(5)
+          print("Starting Chrome...")
+          driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=opts
+          )
+          driver.set_window_size(1920, 1080)
 
-          # ── Click START ──
-          print("Clicking START...")
-          subprocess.run(["xdotool", "mousemove", "960", "540"], env=env)
+          print(f"Loading {site_url}")
+          driver.get(site_url)
+
+          print("Waiting for start-btn...")
+          wait = WebDriverWait(driver, 30)
+          wait.until(EC.presence_of_element_located((By.ID, "start-btn")))
+          print("start-btn found")
+          time.sleep(2)
+
+          print("Clicking start-btn...")
+          driver.execute_script("document.getElementById('start-btn').click();")
           time.sleep(0.5)
-          subprocess.run(["xdotool", "click", "1"], env=env)
+          driver.execute_script("startExperience();")
           time.sleep(0.5)
-          subprocess.run(["xdotool", "click", "1"], env=env)
-          print("START clicked — starting recording immediately...")
-          time.sleep(1)
 
-          # ── Start recording right after START click ──
-          print(f"Recording {duration}s with audio...")
+          splash_hidden = driver.execute_script(
+            "return document.getElementById('splash').classList.contains('hidden');"
+          )
+          print(f"Splash hidden: {splash_hidden}")
+
+          driver.execute_script("spawnBurst();")
+          time.sleep(0.5)
+          driver.execute_script("toggleWarp();")
+          time.sleep(0.5)
+
+          driver.save_screenshot("/tmp/screen_before_record.png")
+          print("Screenshot saved")
+
+          print(f"Starting recording {duration}s...")
           ffmpeg = subprocess.Popen([
             "ffmpeg", "-y",
             "-f", "x11grab",
@@ -165,15 +172,17 @@ jobs:
             output_file
           ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-          # ── Click every second during recording ──
-          elapsed = 0
-          while elapsed < duration:
-            x = random.randint(100, 1820)
-            y = random.randint(100, 980)
-            subprocess.run(["xdotool", "mousemove", str(x), str(y)], env=env)
-            subprocess.run(["xdotool", "click", "1"], env=env)
+          for i in range(duration):
+            driver.execute_script(f"""
+              handleInteraction(
+                {random.randint(100, 1820)},
+                {random.randint(100, 980)}
+              );
+            """)
+            if i == duration // 2:
+              driver.execute_script("spawnBurst();")
             time.sleep(1)
-            elapsed += 1
+
           time.sleep(2)
           ffmpeg.wait()
 
@@ -181,9 +190,8 @@ jobs:
           ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
 
           if not ok:
-            print("Audio recording failed. Error:")
+            print("Audio failed, retrying video only...")
             print(stderr[-800:])
-            print("Retrying video only...")
             if os.path.exists(output_file):
               os.remove(output_file)
             ffmpeg2 = subprocess.Popen([
@@ -203,16 +211,13 @@ jobs:
             time.sleep(duration + 2)
             ffmpeg2.wait()
             ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
-            if ok:
-              print("Video only backup succeeded")
 
-          chrome.terminate()
+          driver.quit()
 
           if ok:
             mb = os.path.getsize(output_file) / 1024 / 1024
             print(f"SUCCESS — {mb:.1f} MB → {output_file}")
           else:
-            print("ffmpeg output:")
             print(stderr[-1000:])
             raise RuntimeError("Recording failed")
           PYEOF
@@ -220,10 +225,12 @@ jobs:
           DURATION: ${{ github.event.inputs.duration || '10' }}
           TS: ${{ env.TS }}
 
-      - name: Save artifact
+      - name: Save artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cosmix-${{ env.TS }}
-          path: /tmp/cosmix_*.mp4
+          path: |
+            /tmp/cosmix_*.mp4
+            /tmp/screen_before_record.png
           retention-days: 14
