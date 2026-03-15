@@ -1,0 +1,169 @@
+name: 🎬 Record COSMIX
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Duration in seconds"
+        required: false
+        default: "10"
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            ffmpeg \
+            xvfb \
+            pulseaudio \
+            chromium-browser \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install selenium webdriver-manager
+
+      - name: Start display and audio
+        run: |
+          Xvfb :99 -screen 0 1080x1920x24 -ac &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          pulseaudio --start --log-target=syslog
+          sleep 2
+
+      - name: Set timestamp
+        run: echo "TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+
+      - name: Record
+        run: |
+          python3 << 'PYEOF'
+          import os, time, subprocess
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.chrome.service import Service
+          from webdriver_manager.chrome import ChromeDriverManager
+
+          duration    = int(os.environ.get("DURATION", "10"))
+          ts          = os.environ.get("TS", "test")
+          output_file = f"/tmp/cosmix_{ts}.mp4"
+          site_url    = "https://tossengames.github.io/cosmix/"
+
+          opts = Options()
+          opts.add_argument("--headless=new")
+          opts.add_argument("--no-sandbox")
+          opts.add_argument("--disable-dev-shm-usage")
+          opts.add_argument("--disable-gpu")
+          opts.add_argument("--window-size=1080,1920")
+          opts.add_argument("--force-device-scale-factor=1")
+          opts.add_argument("--autoplay-policy=no-user-gesture-required")
+          opts.add_argument("--use-fake-ui-for-media-stream")
+          opts.add_argument("--use-fake-device-for-media-stream")
+          opts.add_experimental_option("mobileEmulation", {
+            "deviceMetrics": {
+              "width":       1080,
+              "height":      1920,
+              "pixelRatio":  1.0
+            },
+            "userAgent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36"
+          })
+
+          print(f"Opening {site_url}")
+          driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=opts
+          )
+          driver.set_window_size(1080, 1920)
+          driver.get(site_url)
+
+          # Wait for page load
+          time.sleep(4)
+
+          # Click START to dismiss splash
+          try:
+            driver.execute_script("""
+              const btn = document.getElementById('start-btn');
+              if (btn) btn.click();
+            """)
+            print("Clicked START")
+          except Exception as e:
+            print(f"Note: {e}")
+
+          time.sleep(2)
+
+          # Trigger action so recording looks good
+          driver.execute_script("""
+            if (typeof spawnBurst === 'function') spawnBurst();
+            setTimeout(function() {
+              if (typeof toggleWarp === 'function') toggleWarp();
+            }, 1500);
+            setTimeout(function() {
+              if (typeof spawnBurst === 'function') spawnBurst();
+            }, 4000);
+            setTimeout(function() {
+              if (typeof spawnBurst === 'function') spawnBurst();
+            }, 7000);
+          """)
+          print("Animations triggered")
+
+          # Start recording
+          ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-f", "x11grab",
+            "-video_size", "1080x1920",
+            "-framerate", "30",
+            "-i", ":99.0",
+            "-f", "pulse", "-i", "default",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "20",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-t", str(duration),
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            output_file
+          ]
+
+          print(f"Recording {duration}s → {output_file}")
+          proc = subprocess.Popen(ffmpeg_cmd)
+          time.sleep(duration + 2)
+          proc.wait()
+          driver.quit()
+
+          if os.path.exists(output_file):
+            mb = os.path.getsize(output_file) / 1024 / 1024
+            print(f"Done! {mb:.1f} MB saved to {output_file}")
+          else:
+            raise FileNotFoundError("Recording failed")
+          PYEOF
+        env:
+          DURATION: ${{ github.event.inputs.duration || '10' }}
+          TS: ${{ env.TS }}
+
+      - name: Save as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosmix-${{ env.TS }}
+          path: /tmp/cosmix_*.mp4
+          retention-days: 14
