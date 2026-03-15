@@ -19,7 +19,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      # Cache apt packages so second run is instant
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        id: apt-cache
+        with:
+          path: /var/cache/apt/archives
+          key: apt-${{ runner.os }}-ffmpeg-xvfb-chromium
+          restore-keys: apt-${{ runner.os }}-
+
+      - name: Install system dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
@@ -35,7 +44,15 @@ jobs:
             libxfixes3 \
             libxrandr2 \
             libgbm1 \
-            libasound2
+            libasound2t64
+
+      # Cache pip packages
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-selenium-webdriver-manager
+          restore-keys: pip-
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -44,6 +61,14 @@ jobs:
 
       - name: Install Python deps
         run: pip install selenium webdriver-manager
+
+      # Cache ChromeDriver so it doesn't re-download every time
+      - name: Cache ChromeDriver
+        uses: actions/cache@v4
+        with:
+          path: ~/.wdm
+          key: wdm-${{ runner.os }}-chromium
+          restore-keys: wdm-${{ runner.os }}-
 
       - name: Start display and audio
         run: |
@@ -81,9 +106,9 @@ jobs:
           opts.add_argument("--use-fake-device-for-media-stream")
           opts.add_experimental_option("mobileEmulation", {
             "deviceMetrics": {
-              "width":       1080,
-              "height":      1920,
-              "pixelRatio":  1.0
+              "width":      1080,
+              "height":     1920,
+              "pixelRatio": 1.0
             },
             "userAgent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36"
           })
@@ -96,10 +121,8 @@ jobs:
           driver.set_window_size(1080, 1920)
           driver.get(site_url)
 
-          # Wait for page load
           time.sleep(4)
 
-          # Click START to dismiss splash
           try:
             driver.execute_script("""
               const btn = document.getElementById('start-btn');
@@ -111,7 +134,6 @@ jobs:
 
           time.sleep(2)
 
-          # Trigger action so recording looks good
           driver.execute_script("""
             if (typeof spawnBurst === 'function') spawnBurst();
             setTimeout(function() {
@@ -126,7 +148,6 @@ jobs:
           """)
           print("Animations triggered")
 
-          # Start recording
           ffmpeg_cmd = [
             "ffmpeg", "-y",
             "-f", "x11grab",
@@ -153,7 +174,7 @@ jobs:
 
           if os.path.exists(output_file):
             mb = os.path.getsize(output_file) / 1024 / 1024
-            print(f"Done! {mb:.1f} MB saved to {output_file}")
+            print(f"Done! {mb:.1f} MB → {output_file}")
           else:
             raise FileNotFoundError("Recording failed")
           PYEOF
