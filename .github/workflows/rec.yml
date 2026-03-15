@@ -1,58 +1,51 @@
 name: 🎬 Record COSMIX
 
 on:
-  schedule:
-    - cron: "0 10 * * *"
   workflow_dispatch:
     inputs:
       duration:
         description: "Duration in seconds"
         required: false
         default: "10"
+  schedule:
+    - cron: "0 10 * * *"
 
 jobs:
   record:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cache apt packages
+      - name: Cache apt
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: apt-${{ runner.os }}-cosmix-v3
-          restore-keys: apt-${{ runner.os }}-
+          key: apt-ubuntu22-cosmix-v5
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
             ffmpeg \
             xvfb \
+            x11vnc \
             pulseaudio \
             pulseaudio-utils \
             chromium-browser \
+            xdotool \
             libnss3 \
-            libatk-bridge2.0-0 \
-            libdrm2 \
-            libxcomposite1 \
-            libxdamage1 \
-            libxfixes3 \
-            libxrandr2 \
             libgbm1 \
-            libasound2t64
+            libasound2
 
-      - name: Cache pip packages
+      - name: Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-cosmix-v1
-          restore-keys: pip-
+          key: pip-cosmix-v2
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
@@ -64,136 +57,124 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.wdm
-          key: wdm-${{ runner.os }}-chromium-v1
-          restore-keys: wdm-${{ runner.os }}-
-
-      - name: Start virtual display
-        run: |
-          Xvfb :99 -screen 0 1080x1920x24 -ac &
-          echo "DISPLAY=:99" >> $GITHUB_ENV
-          sleep 3
-          echo "Display ready"
-
-      - name: Start PulseAudio with null sink
-        run: |
-          pulseaudio --kill 2>/dev/null || true
-          sleep 1
-          pulseaudio --start \
-            --exit-idle-time=-1 \
-            --log-target=syslog 2>/dev/null || true
-          sleep 3
-          pactl load-module module-null-sink \
-            sink_name=virtual_sink \
-            sink_properties=device.description=VirtualSink 2>/dev/null || true
-          sleep 1
-          pactl set-default-sink virtual_sink 2>/dev/null || true
-          pactl set-default-source virtual_sink.monitor 2>/dev/null || true
-          sleep 1
-          echo "--- Sinks ---"
-          pactl list sinks short 2>/dev/null || echo "pactl failed"
-          echo "--- Sources ---"
-          pactl list sources short 2>/dev/null || echo "pactl failed"
+          key: wdm-ubuntu22-v2
 
       - name: Set timestamp
         run: echo "TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
 
-      - name: Record
+      - name: Record COSMIX
         run: |
           python3 << 'PYEOF'
-          import os, time, subprocess
-          from selenium import webdriver
-          from selenium.webdriver.chrome.options import Options
-          from selenium.webdriver.chrome.service import Service
-          from webdriver_manager.chrome import ChromeDriverManager
+          import os, time, subprocess, signal
 
           duration    = int(os.environ.get("DURATION", "10"))
           ts          = os.environ.get("TS", "test")
           output_file = f"/tmp/cosmix_{ts}.mp4"
           site_url    = "https://tossengames.github.io/cosmix/"
 
-          opts = Options()
-          opts.add_argument("--headless=new")
-          opts.add_argument("--no-sandbox")
-          opts.add_argument("--disable-dev-shm-usage")
-          opts.add_argument("--disable-gpu")
-          opts.add_argument("--window-size=1080,1920")
-          opts.add_argument("--force-device-scale-factor=1")
-          opts.add_argument("--autoplay-policy=no-user-gesture-required")
-          opts.add_argument("--use-fake-ui-for-media-stream")
-          opts.add_argument("--use-fake-device-for-media-stream")
-          opts.add_argument("--disable-backgrounding-occluded-windows")
-          opts.add_argument("--disable-renderer-backgrounding")
-          opts.add_argument("--disable-background-timer-throttling")
-          opts.add_argument("--run-all-compositor-stages-before-draw")
-          opts.add_experimental_option("mobileEmulation", {
-            "deviceMetrics": {
-              "width":      1080,
-              "height":     1920,
-              "pixelRatio": 1.0
-            },
-            "userAgent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36"
-          })
+          # ── 1. Start Xvfb virtual display ──────────────────────
+          print("Starting Xvfb...")
+          xvfb = subprocess.Popen([
+            "Xvfb", ":99",
+            "-screen", "0", "1080x1920x24",
+            "-ac", "-nolisten", "tcp"
+          ])
+          time.sleep(2)
 
-          print("Starting Chrome...")
-          driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=opts
+          env = os.environ.copy()
+          env["DISPLAY"] = ":99"
+
+          # ── 2. Start PulseAudio with null sink ─────────────────
+          print("Starting PulseAudio...")
+          subprocess.run(["pulseaudio", "--kill"], capture_output=True)
+          time.sleep(1)
+          subprocess.Popen(
+            ["pulseaudio", "--start", "--exit-idle-time=-1"],
+            env=env
           )
-          driver.set_window_size(1080, 1920)
-
-          print(f"Loading {site_url}")
-          driver.get(site_url)
-
-          print("Waiting for page to fully load...")
-          time.sleep(6)
-
-          try:
-            driver.execute_script("""
-              const btn = document.getElementById('start-btn');
-              if (btn) {
-                btn.click();
-                console.log('START clicked');
-              } else {
-                console.log('START button not found');
-              }
-            """)
-            print("Clicked START button")
-          except Exception as e:
-            print(f"Click error: {e}")
-
-          print("Waiting for animations to start...")
-          time.sleep(5)
-
-          driver.execute_script("""
-            if (typeof spawnBurst === 'function') spawnBurst();
-          """)
+          time.sleep(2)
+          subprocess.run(
+            ["pactl", "load-module", "module-null-sink",
+             "sink_name=vsink"],
+            env=env, capture_output=True
+          )
+          subprocess.run(
+            ["pactl", "set-default-sink", "vsink"],
+            env=env, capture_output=True
+          )
+          subprocess.run(
+            ["pactl", "set-default-source", "vsink.monitor"],
+            env=env, capture_output=True
+          )
           time.sleep(1)
 
-          print("Starting ffmpeg recording...")
+          # ── 3. Launch Chrome NON-headless on Xvfb display ──────
+          # This is the key fix — no --headless so canvas renders properly
+          print("Launching Chrome on virtual display...")
+          chrome = subprocess.Popen([
+            "chromium-browser",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1080,1920",
+            "--window-position=0,0",
+            "--force-device-scale-factor=1",
+            "--autoplay-policy=no-user-gesture-required",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
+            "--disable-background-media-suspend",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-translate",
+            "--disable-extensions",
+            "--disable-infobars",
+            "--disable-notifications",
+            f"--app={site_url}",
+          ], env=env)
 
-          cmd_video_only = [
+          # ── 4. Wait for page to fully load ─────────────────────
+          print("Waiting for page load (8s)...")
+          time.sleep(8)
+
+          # ── 5. Click START button using xdotool ────────────────
+          # xdotool simulates a real mouse click at the center of screen
+          # The start button is centered on screen
+          print("Clicking START button...")
+          subprocess.run([
+            "xdotool", "mousemove", "--sync", "540", "960"
+          ], env=env)
+          time.sleep(0.5)
+          subprocess.run([
+            "xdotool", "click", "1"
+          ], env=env)
+          print("Clicked center of screen (START button)")
+
+          # ── 6. Wait for splash to fade and sky to animate ──────
+          print("Waiting for animations (6s)...")
+          time.sleep(6)
+
+          # ── 7. Click a few random spots to trigger explosions ──
+          import random
+          for _ in range(3):
+            x = random.randint(200, 880)
+            y = random.randint(300, 1600)
+            subprocess.run(["xdotool", "mousemove", str(x), str(y)], env=env)
+            time.sleep(0.3)
+            subprocess.run(["xdotool", "click", "1"], env=env)
+            time.sleep(0.5)
+
+          # ── 8. Now record ──────────────────────────────────────
+          print(f"Recording {duration}s...")
+          ffmpeg = subprocess.Popen([
             "ffmpeg", "-y",
             "-f", "x11grab",
+            "-display", ":99",
             "-video_size", "1080x1920",
             "-framerate", "30",
-            "-i", ":99.0",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",
-            "-t", str(duration),
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            output_file
-          ]
-
-          cmd_with_audio = [
-            "ffmpeg", "-y",
-            "-f", "x11grab",
-            "-video_size", "1080x1920",
-            "-framerate", "30",
-            "-i", ":99.0",
+            "-i", ":99.0+0,0",
             "-f", "pulse",
-            "-i", "virtual_sink.monitor",
+            "-i", "vsink.monitor",
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "18",
@@ -203,55 +184,66 @@ jobs:
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             output_file
-          ]
+          ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-          def run_ffmpeg(cmd, label):
-            print(f"Trying: {label}")
-            proc = subprocess.Popen(
-              cmd,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE
-            )
-            half = duration // 2
-            time.sleep(half)
-            try:
-              driver.execute_script("""
-                if (typeof spawnBurst === 'function') spawnBurst();
-                if (typeof toggleWarp  === 'function') toggleWarp();
-              """)
-            except:
-              pass
-            time.sleep(duration - half + 2)
-            proc.wait()
-            stderr = proc.stderr.read().decode("utf-8", errors="ignore")
-            if proc.returncode != 0:
-              print(f"ffmpeg error:\n{stderr[-800:]}")
-            ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
-            if ok:
-              mb = os.path.getsize(output_file) / 1024 / 1024
-              print(f"{label} succeeded — {mb:.1f} MB")
-            return ok
+          # Keep clicking during recording so it stays active
+          half = duration // 2
+          time.sleep(half)
+          for _ in range(4):
+            x = random.randint(100, 980)
+            y = random.randint(200, 1700)
+            subprocess.run(["xdotool", "mousemove", str(x), str(y)], env=env)
+            time.sleep(0.2)
+            subprocess.run(["xdotool", "click", "1"], env=env)
+            time.sleep(0.4)
 
-          success = run_ffmpeg(cmd_with_audio, "video+audio")
+          time.sleep(duration - half + 2)
+          ffmpeg.wait()
 
-          if not success:
-            print("Audio failed — retrying video only")
+          # Check result
+          stderr = ffmpeg.stderr.read().decode("utf-8", errors="ignore")
+          if ffmpeg.returncode != 0:
+            print("ffmpeg stderr (last 1000 chars):")
+            print(stderr[-1000:])
+
+          # Retry video-only if audio failed
+          if not os.path.exists(output_file) or os.path.getsize(output_file) < 50000:
+            print("Retrying without audio...")
             if os.path.exists(output_file):
               os.remove(output_file)
-            success = run_ffmpeg(cmd_video_only, "video only")
+            ffmpeg2 = subprocess.Popen([
+              "ffmpeg", "-y",
+              "-f", "x11grab",
+              "-display", ":99",
+              "-video_size", "1080x1920",
+              "-framerate", "30",
+              "-i", ":99.0+0,0",
+              "-c:v", "libx264",
+              "-preset", "fast",
+              "-crf", "18",
+              "-t", str(duration),
+              "-pix_fmt", "yuv420p",
+              "-movflags", "+faststart",
+              output_file
+            ], env=env)
+            time.sleep(duration + 2)
+            ffmpeg2.wait()
 
-          driver.quit()
+          # Cleanup
+          chrome.terminate()
+          xvfb.terminate()
 
-          if not success:
-            raise RuntimeError("Recording failed on both attempts")
-
-          print(f"Saved to {output_file}")
+          if os.path.exists(output_file) and os.path.getsize(output_file) > 50000:
+            mb = os.path.getsize(output_file) / 1024 / 1024
+            print(f"SUCCESS — {mb:.1f} MB saved to {output_file}")
+          else:
+            raise RuntimeError("Recording failed or file too small")
           PYEOF
         env:
           DURATION: ${{ github.event.inputs.duration || '10' }}
           TS: ${{ env.TS }}
 
-      - name: Save as artifact
+      - name: Save artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
