@@ -69,35 +69,23 @@ jobs:
           sleep 3
           echo "Xvfb ready"
 
-      - name: Start PulseAudio and route Chrome audio
+      - name: Start PulseAudio
         run: |
-          # Kill anything running
           pulseaudio --kill 2>/dev/null || true
           sleep 1
-
-          # Start PulseAudio as a daemon
           pulseaudio \
             --start \
             --exit-idle-time=-1 \
             --log-target=syslog \
             --log-level=error 2>/dev/null || true
           sleep 3
-
-          # Create a null sink — this is a virtual speaker
-          # Chrome will play into this, ffmpeg will record from its monitor
           pactl load-module module-null-sink \
             sink_name=vsink \
             sink_properties=device.description=VirtualSpeaker
           sleep 1
-
-          # Make vsink the default output so Chrome uses it automatically
           pactl set-default-sink vsink
-
-          # The monitor is what ffmpeg reads — it captures everything going into vsink
           pactl set-default-source vsink.monitor
           sleep 1
-
-          # Confirm it worked
           echo "=== Default sink ==="
           pactl info | grep "Default Sink"
           echo "=== Default source ==="
@@ -116,7 +104,6 @@ jobs:
 
           env = os.environ.copy()
           env["DISPLAY"] = ":99"
-          # Tell Chrome to use PulseAudio
           env["PULSE_SERVER"] = "unix:/run/user/1001/pulse/native"
 
           # ── Launch Chrome ──
@@ -138,14 +125,13 @@ jobs:
             "--disable-extensions",
             "--disable-infobars",
             "--disable-notifications",
-            # Tell Chrome to use PulseAudio for output
             "--alsa-output-device=pulse",
             f"--app={site_url}",
           ], env=env, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
-          # ── Wait for full page load ──
-          print("Waiting for page load (10s)...")
-          time.sleep(10)
+          # ── Wait 5 seconds for page load ──
+          print("Waiting for page load (5s)...")
+          time.sleep(5)
 
           # ── Click START ──
           print("Clicking START...")
@@ -153,36 +139,20 @@ jobs:
           time.sleep(0.5)
           subprocess.run(["xdotool", "click", "1"], env=env)
           time.sleep(0.5)
-          # Double click in case first missed
           subprocess.run(["xdotool", "click", "1"], env=env)
-          print("START clicked — waiting for sky (8s)...")
-          time.sleep(8)
-
-          # ── Trigger explosions before recording ──
-          print("Triggering explosions...")
-          for _ in range(6):
-            x = random.randint(100, 1820)
-            y = random.randint(100, 980)
-            subprocess.run(["xdotool", "mousemove", str(x), str(y)], env=env)
-            time.sleep(0.2)
-            subprocess.run(["xdotool", "click", "1"], env=env)
-            time.sleep(0.3)
+          print("START clicked — starting recording immediately...")
           time.sleep(1)
 
-          # ── Start recording video + audio together ──
+          # ── Start recording right after START click ──
           print(f"Recording {duration}s with audio...")
           ffmpeg = subprocess.Popen([
             "ffmpeg", "-y",
-            # Video from virtual display
             "-f", "x11grab",
             "-video_size", "1920x1080",
             "-framerate", "30",
             "-i", ":99.0+0,0",
-            # Audio from PulseAudio virtual sink monitor
-            # This captures exactly what Chrome is playing
             "-f", "pulse",
             "-i", "vsink.monitor",
-            # Encode
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "18",
@@ -191,33 +161,29 @@ jobs:
             "-t", str(duration),
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
-            # Sync audio and video
             "-async", "1",
             output_file
           ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-          # Keep clicking during recording to keep it lively
-          half = max(1, duration // 2)
-          time.sleep(half)
-          for _ in range(4):
+          # ── Click every second during recording ──
+          elapsed = 0
+          while elapsed < duration:
             x = random.randint(100, 1820)
             y = random.randint(100, 980)
             subprocess.run(["xdotool", "mousemove", str(x), str(y)], env=env)
-            time.sleep(0.2)
             subprocess.run(["xdotool", "click", "1"], env=env)
-            time.sleep(0.3)
-          time.sleep(duration - half + 2)
+            time.sleep(1)
+            elapsed += 1
+          time.sleep(2)
           ffmpeg.wait()
 
           stderr = ffmpeg.stderr.read().decode("utf-8", errors="ignore")
-
           ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
 
           if not ok:
-            print("Recording with audio failed. Error:")
+            print("Audio recording failed. Error:")
             print(stderr[-800:])
-            print("")
-            print("Retrying video only as backup...")
+            print("Retrying video only...")
             if os.path.exists(output_file):
               os.remove(output_file)
             ffmpeg2 = subprocess.Popen([
@@ -238,7 +204,7 @@ jobs:
             ffmpeg2.wait()
             ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
             if ok:
-              print("Video-only backup succeeded")
+              print("Video only backup succeeded")
 
           chrome.terminate()
 
@@ -246,6 +212,8 @@ jobs:
             mb = os.path.getsize(output_file) / 1024 / 1024
             print(f"SUCCESS — {mb:.1f} MB → {output_file}")
           else:
+            print("ffmpeg output:")
+            print(stderr[-1000:])
             raise RuntimeError("Recording failed")
           PYEOF
         env:
