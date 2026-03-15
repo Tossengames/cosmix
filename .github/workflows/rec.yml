@@ -23,7 +23,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: apt-${{ runner.os }}-cosmix-v2
+          key: apt-${{ runner.os }}-cosmix-v3
           restore-keys: apt-${{ runner.os }}-
 
       - name: Install system dependencies
@@ -71,28 +71,28 @@ jobs:
         run: |
           Xvfb :99 -screen 0 1080x1920x24 -ac &
           echo "DISPLAY=:99" >> $GITHUB_ENV
-          sleep 2
-          echo "Display started"
+          sleep 3
+          echo "Display ready"
 
-      - name: Start PulseAudio
+      - name: Start PulseAudio with null sink
         run: |
-          # Kill any existing pulseaudio
           pulseaudio --kill 2>/dev/null || true
           sleep 1
-          # Start fresh with no daemon mode first to create config
-          mkdir -p ~/.config/pulse
-          echo "default-server = unix:/tmp/pulse-socket" > ~/.config/pulse/client.conf
-          # Start pulseaudio
-          pulseaudio --start --exit-idle-time=-1 --log-target=syslog 2>/dev/null || true
-          sleep 2
-          # Load a null sink so there is always an audio device
-          pactl load-module module-null-sink sink_name=cosmix_sink 2>/dev/null || true
-          pactl set-default-sink cosmix_sink 2>/dev/null || true
-          pactl load-module module-virtual-source source_name=cosmix_source 2>/dev/null || true
-          pactl set-default-source cosmix_source 2>/dev/null || true
+          pulseaudio --start \
+            --exit-idle-time=-1 \
+            --log-target=syslog 2>/dev/null || true
+          sleep 3
+          pactl load-module module-null-sink \
+            sink_name=virtual_sink \
+            sink_properties=device.description=VirtualSink 2>/dev/null || true
           sleep 1
-          # Check if running
-          pactl info && echo "PulseAudio OK" || echo "PulseAudio not running — will record video only"
+          pactl set-default-sink virtual_sink 2>/dev/null || true
+          pactl set-default-source virtual_sink.monitor 2>/dev/null || true
+          sleep 1
+          echo "--- Sinks ---"
+          pactl list sinks short 2>/dev/null || echo "pactl failed"
+          echo "--- Sources ---"
+          pactl list sources short 2>/dev/null || echo "pactl failed"
 
       - name: Set timestamp
         run: echo "TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
@@ -121,6 +121,10 @@ jobs:
           opts.add_argument("--autoplay-policy=no-user-gesture-required")
           opts.add_argument("--use-fake-ui-for-media-stream")
           opts.add_argument("--use-fake-device-for-media-stream")
+          opts.add_argument("--disable-backgrounding-occluded-windows")
+          opts.add_argument("--disable-renderer-backgrounding")
+          opts.add_argument("--disable-background-timer-throttling")
+          opts.add_argument("--run-all-compositor-stages-before-draw")
           opts.add_experimental_option("mobileEmulation", {
             "deviceMetrics": {
               "width":      1080,
@@ -130,105 +134,118 @@ jobs:
             "userAgent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36"
           })
 
-          print(f"Opening {site_url}")
+          print("Starting Chrome...")
           driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),
             options=opts
           )
           driver.set_window_size(1080, 1920)
+
+          print(f"Loading {site_url}")
           driver.get(site_url)
-          time.sleep(4)
+
+          print("Waiting for page to fully load...")
+          time.sleep(6)
 
           try:
             driver.execute_script("""
               const btn = document.getElementById('start-btn');
-              if (btn) btn.click();
+              if (btn) {
+                btn.click();
+                console.log('START clicked');
+              } else {
+                console.log('START button not found');
+              }
             """)
-            print("Clicked START")
+            print("Clicked START button")
           except Exception as e:
-            print(f"Note: {e}")
+            print(f"Click error: {e}")
 
-          time.sleep(2)
+          print("Waiting for animations to start...")
+          time.sleep(5)
 
           driver.execute_script("""
             if (typeof spawnBurst === 'function') spawnBurst();
-            setTimeout(function() {
-              if (typeof toggleWarp === 'function') toggleWarp();
-            }, 1500);
-            setTimeout(function() {
-              if (typeof spawnBurst === 'function') spawnBurst();
-            }, 4000);
-            setTimeout(function() {
-              if (typeof spawnBurst === 'function') spawnBurst();
-            }, 7000);
           """)
-          print("Animations triggered — starting recording")
+          time.sleep(1)
 
-          # Try with audio first, fall back to video only if audio fails
-          def try_record(with_audio):
-            if with_audio:
-              cmd = [
-                "ffmpeg", "-y",
-                "-f", "x11grab",
-                "-video_size", "1080x1920",
-                "-framerate", "30",
-                "-i", ":99.0",
-                "-f", "pulse",
-                "-i", "cosmix_sink.monitor",
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "20",
-                "-c:a", "aac",
-                "-b:a", "128k",
-                "-t", str(duration),
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                output_file
-              ]
-              print("Recording with audio...")
-            else:
-              cmd = [
-                "ffmpeg", "-y",
-                "-f", "x11grab",
-                "-video_size", "1080x1920",
-                "-framerate", "30",
-                "-i", ":99.0",
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "20",
-                "-t", str(duration),
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-                output_file
-              ]
-              print("Recording video only (no audio)...")
+          print("Starting ffmpeg recording...")
 
+          cmd_video_only = [
+            "ffmpeg", "-y",
+            "-f", "x11grab",
+            "-video_size", "1080x1920",
+            "-framerate", "30",
+            "-i", ":99.0",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-t", str(duration),
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            output_file
+          ]
+
+          cmd_with_audio = [
+            "ffmpeg", "-y",
+            "-f", "x11grab",
+            "-video_size", "1080x1920",
+            "-framerate", "30",
+            "-i", ":99.0",
+            "-f", "pulse",
+            "-i", "virtual_sink.monitor",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-t", str(duration),
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            output_file
+          ]
+
+          def run_ffmpeg(cmd, label):
+            print(f"Trying: {label}")
             proc = subprocess.Popen(
               cmd,
               stdout=subprocess.PIPE,
               stderr=subprocess.PIPE
             )
-            time.sleep(duration + 2)
+            half = duration // 2
+            time.sleep(half)
+            try:
+              driver.execute_script("""
+                if (typeof spawnBurst === 'function') spawnBurst();
+                if (typeof toggleWarp  === 'function') toggleWarp();
+              """)
+            except:
+              pass
+            time.sleep(duration - half + 2)
             proc.wait()
-            return os.path.exists(output_file) and os.path.getsize(output_file) > 10000
+            stderr = proc.stderr.read().decode("utf-8", errors="ignore")
+            if proc.returncode != 0:
+              print(f"ffmpeg error:\n{stderr[-800:]}")
+            ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
+            if ok:
+              mb = os.path.getsize(output_file) / 1024 / 1024
+              print(f"{label} succeeded — {mb:.1f} MB")
+            return ok
 
-          # Try audio first
-          success = try_record(with_audio=True)
+          success = run_ffmpeg(cmd_with_audio, "video+audio")
 
-          # If that failed try video only
           if not success:
-            print("Audio recording failed — retrying video only")
+            print("Audio failed — retrying video only")
             if os.path.exists(output_file):
               os.remove(output_file)
-            success = try_record(with_audio=False)
+            success = run_ffmpeg(cmd_video_only, "video only")
 
           driver.quit()
 
-          if success:
-            mb = os.path.getsize(output_file) / 1024 / 1024
-            print(f"Recording complete! {mb:.1f} MB → {output_file}")
-          else:
-            raise FileNotFoundError("Both recording attempts failed")
+          if not success:
+            raise RuntimeError("Recording failed on both attempts")
+
+          print(f"Saved to {output_file}")
           PYEOF
         env:
           DURATION: ${{ github.event.inputs.duration || '10' }}
