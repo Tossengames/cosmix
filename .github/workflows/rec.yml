@@ -22,27 +22,26 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: apt-ubuntu22-cosmix-v10
+          key: apt-ubuntu22-cosmix-v11
 
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
-            ffmpeg \
             xvfb \
-            pulseaudio \
-            pulseaudio-utils \
             chromium-browser \
             libnss3 \
             libgbm1 \
             libasound2 \
-            dbus-x11
+            ffmpeg
 
-      - name: Cache pip
+      - name: Cache pip and ChromeDriver
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
-          key: pip-cosmix-v6
+          path: |
+            ~/.cache/pip
+            ~/.wdm
+          key: pip-wdm-v2
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -51,12 +50,6 @@ jobs:
 
       - name: Install Python deps
         run: pip install selenium webdriver-manager
-
-      - name: Cache ChromeDriver
-        uses: actions/cache@v4
-        with:
-          path: ~/.wdm
-          key: wdm-ubuntu22-v6
 
       - name: Set timestamp
         run: echo "TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
@@ -67,21 +60,10 @@ jobs:
           echo "DISPLAY=:99" >> $GITHUB_ENV
           sleep 3
 
-      - name: Start PulseAudio
-        run: |
-          pulseaudio --kill 2>/dev/null || true
-          sleep 1
-          pulseaudio --start --exit-idle-time=-1 --log-level=error 2>/dev/null || true
-          sleep 3
-          pactl load-module module-null-sink sink_name=vsink sink_properties=device.description=VirtualSpeaker
-          sleep 1
-          pactl set-default-sink vsink
-          pactl set-default-source vsink.monitor
-
-      - name: Record COSMIX
+      - name: Record via canvas captureStream
         run: |
           python3 << 'PYEOF'
-          import os, time, subprocess, random
+          import os, time, base64, subprocess, random
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
           from selenium.webdriver.chrome.service import Service
@@ -92,7 +74,8 @@ jobs:
 
           duration    = int(os.environ.get("DURATION", "10"))
           ts          = os.environ.get("TS", "test")
-          output_file = f"/tmp/cosmix_{ts}.mp4"
+          webm_file   = f"/tmp/cosmix_{ts}.webm"
+          mp4_file    = f"/tmp/cosmix_{ts}.mp4"
           site_url    = "https://tossengames.github.io/cosmix/"
 
           env = os.environ.copy()
@@ -114,6 +97,8 @@ jobs:
           opts.add_argument("--disable-extensions")
           opts.add_argument("--disable-infobars")
           opts.add_argument("--disable-notifications")
+          opts.add_argument("--enable-usermedia-screen-capturing")
+          opts.add_argument("--allow-http-screen-capture")
           opts.add_experimental_option("mobileEmulation", {
             "deviceMetrics": {
               "width": 390,
@@ -123,49 +108,38 @@ jobs:
             "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
           })
 
+          print("Starting Chrome...")
           driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),
             options=opts
           )
           driver.set_window_size(390, 844)
+
+          print(f"Loading {site_url}")
           driver.get(site_url)
 
+          print("Waiting for start-btn...")
           WebDriverWait(driver, 30).until(
             EC.presence_of_element_located((By.ID, "start-btn"))
           )
           time.sleep(2)
 
+          print("Clicking start-btn...")
           driver.execute_script("document.getElementById('start-btn').click();")
           time.sleep(0.5)
           driver.execute_script("startExperience();")
           time.sleep(1)
 
           driver.execute_script("spawnBurst();")
-          time.sleep(0.5)
+          time.sleep(0.3)
           driver.execute_script("toggleWarp();")
           time.sleep(0.5)
 
           driver.save_screenshot("/tmp/screen_before_record.png")
+          print("Starting canvas recording...")
 
-          ffmpeg = subprocess.Popen([
-            "ffmpeg", "-y",
-            "-f", "x11grab",
-            "-video_size", "390x844",
-            "-framerate", "30",
-            "-i", ":99.0+0,0",
-            "-f", "pulse",
-            "-i", "vsink.monitor",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-t", str(duration),
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-async", "1",
-            output_file
-          ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+          driver.execute_script("window.startRecording(30);")
+          print(f"Recording {duration}s via canvas captureStream...")
 
           for i in range(duration):
             try:
@@ -175,48 +149,62 @@ jobs:
                   {random.randint(50, 800)}
                 );
               """)
-              if i == duration // 2:
+              if i == duration // 3:
                 driver.execute_script("spawnBurst();")
+              if i == (duration * 2) // 3:
+                driver.execute_script("spawnBurst(); toggleWarp();")
             except:
               pass
             time.sleep(1)
 
-          time.sleep(2)
-          ffmpeg.wait()
+          driver.execute_script("window.stopRecording();")
+          print("Waiting for recording to finalize...")
 
-          stderr = ffmpeg.stderr.read().decode("utf-8", errors="ignore")
-          ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
+          for attempt in range(20):
+            done = driver.execute_script("return window._recordingDone === true;")
+            if done:
+              break
+            time.sleep(0.5)
+          print(f"Recording done: {done}")
 
-          if not ok:
-            print(stderr[-800:])
-            if os.path.exists(output_file):
-              os.remove(output_file)
-            ffmpeg2 = subprocess.Popen([
-              "ffmpeg", "-y",
-              "-f", "x11grab",
-              "-video_size", "390x844",
-              "-framerate", "30",
-              "-i", ":99.0+0,0",
-              "-c:v", "libx264",
-              "-preset", "fast",
-              "-crf", "18",
-              "-t", str(duration),
-              "-pix_fmt", "yuv420p",
-              "-movflags", "+faststart",
-              output_file
-            ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            time.sleep(duration + 2)
-            ffmpeg2.wait()
-            ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
+          print("Extracting video from browser...")
+          b64 = driver.execute_async_script("""
+            var done = arguments[0];
+            window.getRecordingBase64()
+              .then(b64 => done(b64))
+              .catch(e => done(null));
+          """)
 
           driver.quit()
 
-          if ok:
-            mb = os.path.getsize(output_file) / 1024 / 1024
-            print(f"SUCCESS — {mb:.1f} MB → {output_file}")
+          if not b64:
+            raise RuntimeError("Failed to get recording from browser")
+
+          video_bytes = base64.b64decode(b64)
+          with open(webm_file, 'wb') as f:
+            f.write(video_bytes)
+          print(f"Webm saved: {os.path.getsize(webm_file)/1024/1024:.1f} MB")
+
+          print("Converting to mp4...")
+          result = subprocess.run([
+            "ffmpeg", "-y",
+            "-i", webm_file,
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "18",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            mp4_file
+          ], capture_output=True, text=True)
+
+          if os.path.exists(mp4_file) and os.path.getsize(mp4_file) > 10000:
+            mb = os.path.getsize(mp4_file) / 1024 / 1024
+            print(f"SUCCESS — {mb:.1f} MB → {mp4_file}")
           else:
-            print(stderr[-1000:])
-            raise RuntimeError("Recording failed")
+            print("ffmpeg stderr:", result.stderr[-500:])
+            print("Using webm as fallback")
           PYEOF
         env:
           DURATION: ${{ github.event.inputs.duration || '10' }}
@@ -229,5 +217,6 @@ jobs:
           name: cosmix-${{ env.TS }}
           path: |
             /tmp/cosmix_*.mp4
+            /tmp/cosmix_*.webm
             /tmp/screen_before_record.png
           retention-days: 14
