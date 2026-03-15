@@ -18,42 +18,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cache apt packages
-        id: apt-cache
+      - name: Install dependencies
+        run: |
+          if [ ! -f /usr/bin/Xvfb ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y \
+              xvfb \
+              pulseaudio \
+              pulseaudio-utils \
+              dbus-x11
+          else
+            echo "Already installed"
+          fi
+
+      - name: Cache pip and ChromeDriver
         uses: actions/cache@v4
         with:
           path: |
-            /var/cache/apt/archives
-            /var/lib/apt/lists
-          key: apt-ubuntu22-${{ hashFiles('.github/workflows/record.yml') }}
-
-      - name: Install dependencies
-        if: steps.apt-cache.outputs.cache-hit != 'true'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            ffmpeg \
-            xvfb \
-            pulseaudio \
-            pulseaudio-utils \
-            chromium-browser \
-            libnss3 \
-            libgbm1 \
-            libasound2 \
-            dbus-x11
-
-      - name: Restore cached packages
-        if: steps.apt-cache.outputs.cache-hit == 'true'
-        run: |
-          sudo dpkg -i /var/cache/apt/archives/*.deb 2>/dev/null || true
-          echo "Packages restored from cache"
-
-      - name: Cache pip
-        id: pip-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-cosmix-${{ hashFiles('.github/workflows/record.yml') }}
+            ~/.cache/pip
+            ~/.wdm
+          key: pip-wdm-v1
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -61,15 +45,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python deps
-        if: steps.pip-cache.outputs.cache-hit != 'true'
         run: pip install selenium webdriver-manager
-
-      - name: Cache ChromeDriver
-        id: wdm-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.wdm
-          key: wdm-ubuntu22-${{ hashFiles('.github/workflows/record.yml') }}
 
       - name: Set timestamp
         run: echo "TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
@@ -79,7 +55,6 @@ jobs:
           Xvfb :99 -screen 0 1920x1080x24 -ac &
           echo "DISPLAY=:99" >> $GITHUB_ENV
           sleep 3
-          echo "Xvfb ready"
 
       - name: Start PulseAudio
         run: |
@@ -91,12 +66,11 @@ jobs:
           sleep 1
           pactl set-default-sink vsink
           pactl set-default-source vsink.monitor
-          echo "PulseAudio ready"
 
       - name: Record COSMIX
         run: |
           python3 << 'PYEOF'
-          import os, time, subprocess, random
+          import os, time, subprocess, random, shutil
           from selenium import webdriver
           from selenium.webdriver.chrome.options import Options
           from selenium.webdriver.chrome.service import Service
@@ -113,7 +87,17 @@ jobs:
           env = os.environ.copy()
           env["DISPLAY"] = ":99"
 
+          chrome_bin = (
+            shutil.which("google-chrome-stable") or
+            shutil.which("google-chrome") or
+            shutil.which("chromium-browser") or
+            shutil.which("chromium")
+          )
+          print(f"Chrome: {chrome_bin}")
+
           opts = Options()
+          if chrome_bin:
+            opts.binary_location = chrome_bin
           opts.add_argument("--no-sandbox")
           opts.add_argument("--disable-dev-shm-usage")
           opts.add_argument("--disable-gpu")
@@ -129,32 +113,22 @@ jobs:
           opts.add_argument("--disable-infobars")
           opts.add_argument("--disable-notifications")
 
-          print("Starting Chrome...")
           driver = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()),
             options=opts
           )
           driver.set_window_size(1920, 1080)
-
-          print(f"Loading {site_url}")
           driver.get(site_url)
 
-          print("Waiting for start-btn...")
-          wait = WebDriverWait(driver, 30)
-          wait.until(EC.presence_of_element_located((By.ID, "start-btn")))
-          print("start-btn found")
+          WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.ID, "start-btn"))
+          )
           time.sleep(2)
 
-          print("Clicking start-btn...")
           driver.execute_script("document.getElementById('start-btn').click();")
           time.sleep(0.5)
           driver.execute_script("startExperience();")
-          time.sleep(0.5)
-
-          splash_hidden = driver.execute_script(
-            "return document.getElementById('splash').classList.contains('hidden');"
-          )
-          print(f"Splash hidden: {splash_hidden}")
+          time.sleep(1)
 
           driver.execute_script("spawnBurst();")
           time.sleep(0.5)
@@ -162,9 +136,7 @@ jobs:
           time.sleep(0.5)
 
           driver.save_screenshot("/tmp/screen_before_record.png")
-          print("Screenshot saved")
 
-          print(f"Starting recording {duration}s...")
           ffmpeg = subprocess.Popen([
             "ffmpeg", "-y",
             "-f", "x11grab",
@@ -186,14 +158,17 @@ jobs:
           ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
           for i in range(duration):
-            driver.execute_script(f"""
-              handleInteraction(
-                {random.randint(100, 1820)},
-                {random.randint(100, 980)}
-              );
-            """)
-            if i == duration // 2:
-              driver.execute_script("spawnBurst();")
+            try:
+              driver.execute_script(f"""
+                handleInteraction(
+                  {random.randint(100, 1820)},
+                  {random.randint(100, 980)}
+                );
+              """)
+              if i == duration // 2:
+                driver.execute_script("spawnBurst();")
+            except:
+              pass
             time.sleep(1)
 
           time.sleep(2)
@@ -203,7 +178,6 @@ jobs:
           ok = os.path.exists(output_file) and os.path.getsize(output_file) > 50000
 
           if not ok:
-            print("Audio failed, retrying video only...")
             print(stderr[-800:])
             if os.path.exists(output_file):
               os.remove(output_file)
