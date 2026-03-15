@@ -1,0 +1,107 @@
+name: 🔑 Get YouTube Token (run once)
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_code:
+        description: "Paste the Google auth code here (leave empty for Step 1)"
+        required: false
+        default: ""
+
+jobs:
+  get-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install google-auth google-auth-oauthlib google-api-python-client
+
+      - name: Step 1 — Print auth URL
+        if: ${{ github.event.inputs.auth_code == '' }}
+        run: |
+          python3 << 'EOF'
+          from google_auth_oauthlib.flow import Flow
+
+          CLIENT_CONFIG = {
+            "installed": {
+              "client_id":     "673916580973-0qkqp7n2a5p1e0oa3tnbvn98j2qrbemb.apps.googleusercontent.com",
+              "client_secret": "iWYpSBHGFFQmCRncQeWHHqBZ",
+              "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
+              "token_uri":     "https://oauth2.googleapis.com/token",
+              "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob"]
+            }
+          }
+
+          flow = Flow.from_client_config(
+            CLIENT_CONFIG,
+            scopes=["https://www.googleapis.com/auth/youtube.upload",
+                    "https://www.googleapis.com/auth/youtube"],
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+          )
+
+          auth_url, _ = flow.authorization_url(
+            access_type="offline",
+            prompt="consent"
+          )
+
+          print("=" * 70)
+          print("OPEN THIS URL IN YOUR BROWSER:")
+          print("")
+          print(auth_url)
+          print("")
+          print("=" * 70)
+          print("After approving, copy the code.")
+          print("Run this workflow again and paste it in the auth_code field.")
+          print("=" * 70)
+          EOF
+
+      - name: Step 2 — Exchange code for refresh token
+        if: ${{ github.event.inputs.auth_code != '' }}
+        run: |
+          python3 << 'EOF'
+          from google_auth_oauthlib.flow import Flow
+          import os
+
+          CLIENT_CONFIG = {
+            "installed": {
+              "client_id":     "673916580973-0qkqp7n2a5p1e0oa3tnbvn98j2qrbemb.apps.googleusercontent.com",
+              "client_secret": "iWYpSBHGFFQmCRncQeWHHqBZ",
+              "auth_uri":      "https://accounts.google.com/o/oauth2/auth",
+              "token_uri":     "https://oauth2.googleapis.com/token",
+              "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob"]
+            }
+          }
+
+          flow = Flow.from_client_config(
+            CLIENT_CONFIG,
+            scopes=["https://www.googleapis.com/auth/youtube.upload",
+                    "https://www.googleapis.com/auth/youtube"],
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+          )
+
+          code = os.environ["AUTH_CODE"].strip()
+          flow.fetch_token(code=code)
+          creds = flow.credentials
+
+          print("=" * 70)
+          print("SUCCESS! Add these 3 values as GitHub Secrets:")
+          print("Repo → Settings → Secrets → Actions → New repository secret")
+          print("=" * 70)
+          print("")
+          print("Secret name:  YT_CLIENT_ID")
+          print("Secret value: " + creds.client_id)
+          print("")
+          print("Secret name:  YT_CLIENT_SECRET")
+          print("Secret value: " + creds.client_secret)
+          print("")
+          print("Secret name:  YT_REFRESH_TOKEN")
+          print("Secret value: " + creds.refresh_token)
+          print("")
+          print("=" * 70)
+          EOF
+        env:
+          AUTH_CODE: ${{ github.event.inputs.auth_code }}
