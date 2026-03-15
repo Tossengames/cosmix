@@ -751,42 +751,69 @@ function playSFX(type,x,y,size){
 function _synthSFX(type,size,dest,now){
   const osc=AC.createOscillator(), g=AC.createGain();
   osc.connect(g); g.connect(dest);
-  if((type==='explode'||type==='collide')&&(size||0)>2){
+
+  // Noise burst for all explosions (not just big ones)
+  if(type==='explode'||type==='collide'){
     try{
-      const bsz=Math.floor(AC.sampleRate*.35),nb=AC.createBuffer(1,bsz,AC.sampleRate);
-      const nd=nb.getChannelData(0); for(let i=0;i<bsz;i++) nd[i]=(Math.random()*2-1);
+      const dur=0.3+Math.random()*0.2;
+      const bsz=Math.floor(AC.sampleRate*dur);
+      const nb=AC.createBuffer(1,bsz,AC.sampleRate);
+      const nd=nb.getChannelData(0);
+      for(let i=0;i<bsz;i++) nd[i]=(Math.random()*2-1)*Math.pow(1-i/bsz,1.5);
       const ns=AC.createBufferSource(); ns.buffer=nb;
       const ng=AC.createGain(), nf=AC.createBiquadFilter();
-      nf.type='bandpass'; nf.frequency.value=140; nf.Q.value=.5;
+      nf.type='bandpass';
+      nf.frequency.value=100+Math.random()*200;
+      nf.Q.value=0.4;
       ns.connect(nf); nf.connect(ng); ng.connect(dest);
-      ng.gain.setValueAtTime(.55,now); ng.gain.exponentialRampToValueAtTime(.0001,now+.35);
-      ns.start(now); ns.stop(now+.35);
+      ng.gain.setValueAtTime(0.7,now);
+      ng.gain.exponentialRampToValueAtTime(0.0001,now+dur);
+      ns.start(now); ns.stop(now+dur);
     }catch(e){}
   }
+
   if(type==='explode'||type==='collide'){
-    const base=size?Math.max(70,640-size*35):480;
+    // Pitch varies by size — big meteor = deep boom, small = higher crack
+    const base=size?Math.max(60,700-size*40):500;
     osc.type='sawtooth';
-    osc.frequency.setValueAtTime(base+Math.random()*220,now);
-    osc.frequency.exponentialRampToValueAtTime(38,now+.42);
-    g.gain.setValueAtTime(.9,now); g.gain.exponentialRampToValueAtTime(.0001,now+.42);
-    osc.start(now); osc.stop(now+.42);
+    osc.frequency.setValueAtTime(base+Math.random()*200,now);
+    osc.frequency.exponentialRampToValueAtTime(35,now+.45);
+    g.gain.setValueAtTime(1.0,now);
+    g.gain.exponentialRampToValueAtTime(0.0001,now+.45);
+    osc.start(now); osc.stop(now+.45);
+
   } else if(type==='chain'){
     osc.type='square';
-    osc.frequency.setValueAtTime(580+Math.random()*380,now);
-    osc.frequency.exponentialRampToValueAtTime(90,now+.2);
-    g.gain.setValueAtTime(.65,now); g.gain.exponentialRampToValueAtTime(.0001,now+.2);
-    osc.start(now); osc.stop(now+.2);
+    osc.frequency.setValueAtTime(500+Math.random()*400,now);
+    osc.frequency.exponentialRampToValueAtTime(80,now+.18);
+    g.gain.setValueAtTime(0.6,now);
+    g.gain.exponentialRampToValueAtTime(0.0001,now+.18);
+    osc.start(now); osc.stop(now+.18);
+
   } else if(type==='touch'){
-    osc.type='triangle';
-    osc.frequency.setValueAtTime(260+Math.random()*180,now);
-    osc.frequency.exponentialRampToValueAtTime(60,now+.22);
-    g.gain.setValueAtTime(.6,now); g.gain.exponentialRampToValueAtTime(.0001,now+.22);
-    osc.start(now); osc.stop(now+.22);
+    // Soft sparkle sound
+    osc.type='sine';
+    osc.frequency.setValueAtTime(800+Math.random()*400,now);
+    osc.frequency.exponentialRampToValueAtTime(200,now+.3);
+    g.gain.setValueAtTime(0.4,now);
+    g.gain.exponentialRampToValueAtTime(0.0001,now+.3);
+    osc.start(now); osc.stop(now+.3);
+
+  } else if(type==='whoosh'){
+    // One-shot whoosh crack for meteor spawn
+    osc.type='sawtooth';
+    osc.frequency.setValueAtTime(1200+Math.random()*600,now);
+    osc.frequency.exponentialRampToValueAtTime(80,now+.25);
+    g.gain.setValueAtTime(0.5,now);
+    g.gain.exponentialRampToValueAtTime(0.0001,now+.25);
+    osc.start(now); osc.stop(now+.25);
+
   } else if(type==='warp'){
     osc.type='sine';
     osc.frequency.setValueAtTime(150,now);
     osc.frequency.exponentialRampToValueAtTime(2600,now+.55);
-    g.gain.setValueAtTime(.9,now); g.gain.exponentialRampToValueAtTime(.0001,now+.55);
+    g.gain.setValueAtTime(0.9,now);
+    g.gain.exponentialRampToValueAtTime(0.0001,now+.55);
     osc.start(now); osc.stop(now+.55);
   }
 }
@@ -1007,7 +1034,12 @@ class Meteor{
     const spMax=parseFloat(document.getElementById('r-spmax').value);
     const boost=1+musicEnergy*(CFG.musicSens/5);
     this.speed=(spMin+Math.random()*Math.max(.1,spMax-spMin))*boost;
-    this.size=parseFloat(document.getElementById('r-msize').value)*(.6+Math.random()*.9)*(1+musicEnergy*.4);
+    // Each meteor gets its own random size — base from slider but wide per-meteor variation
+    // This gives a mix of tiny dots AND big dramatic streaks
+    const baseSize=parseFloat(document.getElementById('r-msize').value);
+    const sizeVariants=[0.3,0.5,0.7,1.0,1.4,2.0,2.8,3.5];
+    const sv=sizeVariants[Math.floor(Math.random()*sizeVariants.length)];
+    this.size=baseSize*sv*(1+musicEnergy*.4);
     this.trailLen=parseInt(document.getElementById('r-trail').value);
     if(musicEnergy>.7){
       this.color=['#ff4400','#ff0044','#ff8800','#ffcc00'][Math.floor(Math.random()*4)];
@@ -1046,7 +1078,7 @@ class Meteor{
         triggerExplosion(this.x,this.y,this.color,randType(),this.size,false); return;
       }
     }
-    if(this.x<-120||this.x>W+120||this.y<-120||this.y>H+120){this.active=false;cleanWhoosh(this);}
+    if(this.x<-60||this.x>W+60||this.y<-60||this.y>H+60){this.active=false;cleanWhoosh(this);}
   }
   draw(){
     if(this.trail.length<2) return;
@@ -1182,6 +1214,10 @@ function updateParticles(){
   for(let i=particles.length-1;i>=0;i--){
     const p=particles[i];
     p.x+=p.vx;p.y+=p.vy;p.vy+=p.grav;p.vx*=.968;p.vy*=.968;p.rot+=p.rotSpd;p.alpha-=p.decay;
+    // Kill off-screen particles — don't let them accumulate off canvas
+    if(p.x<-100||p.x>W+100||p.y<-100||p.y>H+100){
+      if(p.onDeath)p.onDeath();particles.splice(i,1);continue;
+    }
     if(p.alpha<=0){if(p.onDeath)p.onDeath();particles.splice(i,1);continue;}
     ctx.save();ctx.globalAlpha=Math.max(0,p.alpha);
     ctx.fillStyle=p.color;ctx.strokeStyle=p.color;ctx.shadowColor=p.color;ctx.shadowBlur=6;
@@ -1218,8 +1254,10 @@ function spawnMeteors(dt){
   const active=meteors.filter(m=>m.active).length;
   const interval=warpMode?6:Math.max(12,90-musicEnergy*50);
   if(meteorTimer>interval&&active<target){
-    meteors.push(new Meteor(false));meteorTimer=0;
+    const nm=new Meteor(false);meteors.push(nm);meteorTimer=0;
     shotCount++;document.getElementById('s-mt').textContent=shotCount;
+    // Play spawn whoosh at meteor's starting position
+    playSFX('whoosh',nm.x,nm.y,nm.size);
   }
   for(let i=meteors.length-1;i>=0;i--) if(!meteors[i].active)meteors.splice(i,1);
   if(meteors.length>HARD_MAX_METEORS)meteors.splice(0,meteors.length-HARD_MAX_METEORS);
@@ -1427,53 +1465,52 @@ function randomiseAll(){
     return v;
   };
 
-  // Meteor settings
-  ri('r-count',3,18);
-  rf('r-spmin',1,8);
-  rf('r-spmax',9,28);
-  ri('r-trail',10,60);
-  rf('r-msize',1.5,6,1);
+  // Meteor — slow speeds, varied sizes, low count for performance
+  ri('r-count',3,7);
+  rf('r-spmin',1,2.5);
+  rf('r-spmax',3,6);
+  ri('r-trail',20,45);
+  // Base size random — constructor also adds its own random multiplier per meteor
+  rf('r-msize',1,5,1);
 
-  // Stars
-  ri('r-stars',100,380);
-  rf('r-twinkle',1,8,1);
+  // Stars — low count for smooth performance on weak devices
+  ri('r-stars',60,150);
+  rf('r-twinkle',1,5,1);
 
   // Color
   const ci=Math.floor(Math.random()*PALETTE.length);
   dominantColor=PALETTE[ci];
-  const colBias=Math.floor(Math.random()*80)+10;
+  const colBias=Math.floor(Math.random()*60)+30;
   const cbe=document.getElementById('r-cbias');
   if(cbe){cbe.value=colBias;document.getElementById('d-cbias').textContent=colBias+'%';}
   CFG.colorBias=colBias/100;
-  // Highlight the random color swatch
   document.querySelectorAll('.sw').forEach((s,i)=>{s.classList.toggle('on',i===ci);});
 
-  // Explosions
-  const pmin=ri('r-pmin',10,40);
-  const pmax=ri('r-pmax',Math.max(pmin+10,40),100);
+  // Explosions — light settings for weak devices
+  const pmin=ri('r-pmin',8,20);
+  const pmax=ri('r-pmax',Math.max(pmin+10,20),45);
   document.getElementById('r-pmax').value=pmax;document.getElementById('d-pmax').textContent=pmax;
-  ri('r-maxsim',2,6);
-  ri('r-chain',30,120);
-  ri('r-chainmax',1,5);
+  ri('r-maxsim',2,3);
+  ri('r-chain',20,70);
+  ri('r-chainmax',1,3);
 
-  // Atmosphere
-  rf('r-nebden',2,8,0);
-  rf('r-aurora',0,7,0);
+  // Atmosphere — light
+  rf('r-nebden',1,4,0);
+  rf('r-aurora',0,3,0);
 
-  // Random direction
+  // Direction
   const dirs=['random','right','left','down','diag'];
   const dir=dirs[Math.floor(Math.random()*dirs.length)];
   setDir(dir,document.getElementById('dir-'+dir));
 
-  // Random features on/off
-  CFG.constellation=Math.random()>.35;
+  // Features — constellation off by default saves CPU, nebula 50/50
+  CFG.constellation=Math.random()>.7;
   document.getElementById('tog-const').classList.toggle('on',CFG.constellation);
-  CFG.nebula=Math.random()>.2;
+  CFG.nebula=Math.random()>.5;
   document.getElementById('tog-neb').classList.toggle('on',CFG.nebula);
-  CFG.motionblur=Math.random()>.15;
-  document.getElementById('tog-blur').classList.toggle('on',CFG.motionblur);
+  CFG.motionblur=true;
+  document.getElementById('tog-blur').classList.toggle('on',true);
 
-  // Rebuild with new values
   rebuildStars();
   rebuildNebula();
 }
