@@ -19,13 +19,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Cache apt packages so second run is instant
       - name: Cache apt packages
         uses: actions/cache@v4
-        id: apt-cache
         with:
           path: /var/cache/apt/archives
-          key: apt-${{ runner.os }}-ffmpeg-xvfb-chromium
+          key: apt-${{ runner.os }}-cosmix-v2
           restore-keys: apt-${{ runner.os }}-
 
       - name: Install system dependencies
@@ -35,6 +33,7 @@ jobs:
             ffmpeg \
             xvfb \
             pulseaudio \
+            pulseaudio-utils \
             chromium-browser \
             libnss3 \
             libatk-bridge2.0-0 \
@@ -46,12 +45,11 @@ jobs:
             libgbm1 \
             libasound2t64
 
-      # Cache pip packages
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-selenium-webdriver-manager
+          key: pip-cosmix-v1
           restore-keys: pip-
 
       - name: Set up Python
@@ -62,20 +60,39 @@ jobs:
       - name: Install Python deps
         run: pip install selenium webdriver-manager
 
-      # Cache ChromeDriver so it doesn't re-download every time
       - name: Cache ChromeDriver
         uses: actions/cache@v4
         with:
           path: ~/.wdm
-          key: wdm-${{ runner.os }}-chromium
+          key: wdm-${{ runner.os }}-chromium-v1
           restore-keys: wdm-${{ runner.os }}-
 
-      - name: Start display and audio
+      - name: Start virtual display
         run: |
           Xvfb :99 -screen 0 1080x1920x24 -ac &
           echo "DISPLAY=:99" >> $GITHUB_ENV
-          pulseaudio --start --log-target=syslog
           sleep 2
+          echo "Display started"
+
+      - name: Start PulseAudio
+        run: |
+          # Kill any existing pulseaudio
+          pulseaudio --kill 2>/dev/null || true
+          sleep 1
+          # Start fresh with no daemon mode first to create config
+          mkdir -p ~/.config/pulse
+          echo "default-server = unix:/tmp/pulse-socket" > ~/.config/pulse/client.conf
+          # Start pulseaudio
+          pulseaudio --start --exit-idle-time=-1 --log-target=syslog 2>/dev/null || true
+          sleep 2
+          # Load a null sink so there is always an audio device
+          pactl load-module module-null-sink sink_name=cosmix_sink 2>/dev/null || true
+          pactl set-default-sink cosmix_sink 2>/dev/null || true
+          pactl load-module module-virtual-source source_name=cosmix_source 2>/dev/null || true
+          pactl set-default-source cosmix_source 2>/dev/null || true
+          sleep 1
+          # Check if running
+          pactl info && echo "PulseAudio OK" || echo "PulseAudio not running — will record video only"
 
       - name: Set timestamp
         run: echo "TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
@@ -120,7 +137,6 @@ jobs:
           )
           driver.set_window_size(1080, 1920)
           driver.get(site_url)
-
           time.sleep(4)
 
           try:
@@ -146,43 +162,80 @@ jobs:
               if (typeof spawnBurst === 'function') spawnBurst();
             }, 7000);
           """)
-          print("Animations triggered")
+          print("Animations triggered — starting recording")
 
-          ffmpeg_cmd = [
-            "ffmpeg", "-y",
-            "-f", "x11grab",
-            "-video_size", "1080x1920",
-            "-framerate", "30",
-            "-i", ":99.0",
-            "-f", "pulse", "-i", "default",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "20",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-t", str(duration),
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            output_file
-          ]
+          # Try with audio first, fall back to video only if audio fails
+          def try_record(with_audio):
+            if with_audio:
+              cmd = [
+                "ffmpeg", "-y",
+                "-f", "x11grab",
+                "-video_size", "1080x1920",
+                "-framerate", "30",
+                "-i", ":99.0",
+                "-f", "pulse",
+                "-i", "cosmix_sink.monitor",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "20",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-t", str(duration),
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                output_file
+              ]
+              print("Recording with audio...")
+            else:
+              cmd = [
+                "ffmpeg", "-y",
+                "-f", "x11grab",
+                "-video_size", "1080x1920",
+                "-framerate", "30",
+                "-i", ":99.0",
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "20",
+                "-t", str(duration),
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                output_file
+              ]
+              print("Recording video only (no audio)...")
 
-          print(f"Recording {duration}s → {output_file}")
-          proc = subprocess.Popen(ffmpeg_cmd)
-          time.sleep(duration + 2)
-          proc.wait()
+            proc = subprocess.Popen(
+              cmd,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE
+            )
+            time.sleep(duration + 2)
+            proc.wait()
+            return os.path.exists(output_file) and os.path.getsize(output_file) > 10000
+
+          # Try audio first
+          success = try_record(with_audio=True)
+
+          # If that failed try video only
+          if not success:
+            print("Audio recording failed — retrying video only")
+            if os.path.exists(output_file):
+              os.remove(output_file)
+            success = try_record(with_audio=False)
+
           driver.quit()
 
-          if os.path.exists(output_file):
+          if success:
             mb = os.path.getsize(output_file) / 1024 / 1024
-            print(f"Done! {mb:.1f} MB → {output_file}")
+            print(f"Recording complete! {mb:.1f} MB → {output_file}")
           else:
-            raise FileNotFoundError("Recording failed")
+            raise FileNotFoundError("Both recording attempts failed")
           PYEOF
         env:
           DURATION: ${{ github.event.inputs.duration || '10' }}
           TS: ${{ env.TS }}
 
       - name: Save as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cosmix-${{ env.TS }}
