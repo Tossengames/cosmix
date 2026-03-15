@@ -18,13 +18,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cache apt
+      - name: Cache apt packages
+        id: apt-cache
         uses: actions/cache@v4
         with:
-          path: /var/cache/apt/archives
-          key: apt-ubuntu22-cosmix-v10
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt/lists
+          key: apt-ubuntu22-${{ hashFiles('.github/workflows/record.yml') }}
 
       - name: Install dependencies
+        if: steps.apt-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
@@ -38,11 +42,18 @@ jobs:
             libasound2 \
             dbus-x11
 
+      - name: Restore cached packages
+        if: steps.apt-cache.outputs.cache-hit == 'true'
+        run: |
+          sudo dpkg -i /var/cache/apt/archives/*.deb 2>/dev/null || true
+          echo "Packages restored from cache"
+
       - name: Cache pip
+        id: pip-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-cosmix-v6
+          key: pip-cosmix-${{ hashFiles('.github/workflows/record.yml') }}
 
       - name: Setup Python
         uses: actions/setup-python@v4
@@ -50,13 +61,15 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python deps
+        if: steps.pip-cache.outputs.cache-hit != 'true'
         run: pip install selenium webdriver-manager
 
       - name: Cache ChromeDriver
+        id: wdm-cache
         uses: actions/cache@v4
         with:
           path: ~/.wdm
-          key: wdm-ubuntu22-v6
+          key: wdm-ubuntu22-${{ hashFiles('.github/workflows/record.yml') }}
 
       - name: Set timestamp
         run: echo "TS=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
