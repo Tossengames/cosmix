@@ -1,0 +1,278 @@
+name: 🎬 Record & Upload to YouTube
+
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Recording duration in seconds (max 59)"
+        required: false
+        default: "30"
+      title:
+        description: "YouTube title (leave blank for auto)"
+        required: false
+        default: ""
+
+jobs:
+  record-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            ffmpeg \
+            xvfb \
+            pulseaudio \
+            chromium-browser \
+            libnss3 \
+            libatk-bridge2.0-0 \
+            libdrm2 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libasound2
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install \
+            selenium \
+            webdriver-manager \
+            google-auth \
+            google-auth-oauthlib \
+            google-api-python-client
+
+      - name: Start virtual display and audio
+        run: |
+          Xvfb :99 -screen 0 1080x1920x24 -ac &
+          echo "DISPLAY=:99" >> $GITHUB_ENV
+          pulseaudio --start --log-target=syslog
+          sleep 2
+
+      - name: Set timestamp
+        run: echo "TIMESTAMP=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+
+      - name: Record COSMIX
+        run: |
+          python3 << 'PYEOF'
+          import os, time, subprocess
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.chrome.service import Service
+          from webdriver_manager.chrome import ChromeDriverManager
+
+          duration    = int(os.environ.get("DURATION", "30"))
+          timestamp   = os.environ.get("TIMESTAMP", "video")
+          output_file = f"/tmp/cosmix_{timestamp}.mp4"
+          site_url    = "https://tossengames.github.io/cosmix/"
+
+          opts = Options()
+          opts.add_argument("--headless=new")
+          opts.add_argument("--no-sandbox")
+          opts.add_argument("--disable-dev-shm-usage")
+          opts.add_argument("--disable-gpu")
+          opts.add_argument("--window-size=1080,1920")
+          opts.add_argument("--force-device-scale-factor=1")
+          opts.add_argument("--autoplay-policy=no-user-gesture-required")
+          opts.add_argument("--use-fake-ui-for-media-stream")
+          opts.add_argument("--use-fake-device-for-media-stream")
+          opts.add_experimental_option("mobileEmulation", {
+            "deviceMetrics": {
+              "width": 1080,
+              "height": 1920,
+              "pixelRatio": 1.0
+            },
+            "userAgent": "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36"
+          })
+
+          print(f"Opening {site_url}")
+          driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=opts
+          )
+          driver.set_window_size(1080, 1920)
+          driver.get(site_url)
+          time.sleep(4)
+
+          try:
+            driver.execute_script("""
+              const btn = document.getElementById('start-btn');
+              if (btn) btn.click();
+            """)
+            print("Clicked START button")
+          except Exception as e:
+            print(f"Note: {e}")
+
+          time.sleep(2)
+
+          driver.execute_script("""
+            if (typeof spawnBurst === 'function') spawnBurst();
+            setTimeout(function() {
+              if (typeof toggleWarp === 'function') toggleWarp();
+            }, 3000);
+            setTimeout(function() {
+              if (typeof spawnBurst === 'function') spawnBurst();
+            }, 8000);
+            setTimeout(function() {
+              if (typeof toggleWarp === 'function') toggleWarp();
+            }, 14000);
+            setTimeout(function() {
+              if (typeof spawnBurst === 'function') spawnBurst();
+            }, 20000);
+          """)
+          print("Animations triggered")
+
+          ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-f", "x11grab",
+            "-video_size", "1080x1920",
+            "-framerate", "30",
+            "-i", ":99.0",
+            "-f", "pulse", "-i", "default",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-t", str(duration),
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            output_file
+          ]
+
+          print(f"Recording {duration}s to {output_file}")
+          proc = subprocess.Popen(ffmpeg_cmd)
+          time.sleep(duration + 2)
+          proc.wait()
+          driver.quit()
+
+          if os.path.exists(output_file):
+            mb = os.path.getsize(output_file) / 1024 / 1024
+            print(f"Recording done: {mb:.1f} MB")
+            with open("/tmp/output_path.txt", "w") as f:
+              f.write(output_file)
+          else:
+            raise FileNotFoundError("Recording failed")
+          PYEOF
+        env:
+          DURATION: ${{ github.event.inputs.duration || '30' }}
+          TIMESTAMP: ${{ env.TIMESTAMP }}
+
+      - name: Upload to YouTube
+        run: |
+          python3 << 'PYEOF'
+          import os, random
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+          from google.auth.transport.requests import Request
+
+          with open("/tmp/output_path.txt") as f:
+            video_file = f.read().strip()
+
+          creds = Credentials(
+            token=None,
+            refresh_token=os.environ["YT_REFRESH_TOKEN"],
+            client_id=os.environ["YT_CLIENT_ID"],
+            client_secret=os.environ["YT_CLIENT_SECRET"],
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=["https://www.googleapis.com/auth/youtube.upload"]
+          )
+          creds.refresh(Request())
+          print("Token refreshed")
+
+          youtube = build("youtube", "v3", credentials=creds)
+
+          custom_title = "${{ github.event.inputs.title }}"
+          titles = [
+            "🌌 Watch shooting stars collide in real time #shorts",
+            "✨ Cosmic explosions — interactive night sky #shorts",
+            "🚀 Shooting stars hitting each other 🤯 #shorts",
+            "💥 Infinite meteor shower — tap to explode #shorts",
+            "🌠 Night sky simulator — every second is different #shorts",
+            "☄️ Meteor collision caught live 🔥 #shorts",
+            "🌌 Space vibes — generative night sky #shorts",
+          ]
+          title = custom_title.strip() if custom_title.strip() else random.choice(titles)
+          title = title[:100]
+
+          description = """An interactive cosmic night sky built with pure code.
+
+Every explosion, every shooting star, every collision is generated live.
+No two recordings are ever the same.
+
+Try it yourself → https://tossengames.github.io/cosmix/
+
+#cosmix #nightsky #shootingstars #space #satisfying #shorts #generativeart"""
+
+          tags = [
+            "shooting stars", "meteor shower", "space", "night sky",
+            "satisfying", "shorts", "generative art", "explosions",
+            "cosmic", "relaxing", "visual", "interactive"
+          ]
+
+          print(f"Uploading: {title}")
+
+          media = MediaFileUpload(
+            video_file,
+            mimetype="video/mp4",
+            resumable=True,
+            chunksize=5 * 1024 * 1024
+          )
+
+          request = youtube.videos().insert(
+            part="snippet,status",
+            body={
+              "snippet": {
+                "title":       title,
+                "description": description,
+                "tags":        tags,
+                "categoryId":  "22"
+              },
+              "status": {
+                "privacyStatus":           "public",
+                "selfDeclaredMadeForKids": False,
+                "madeForKids":             False
+              }
+            },
+            media_body=media
+          )
+
+          response = None
+          while response is None:
+            status, response = request.next_chunk()
+            if status:
+              print(f"Progress: {int(status.progress() * 100)}%")
+
+          vid = response["id"]
+          print("")
+          print("Upload complete!")
+          print("YouTube URL: https://www.youtube.com/watch?v=" + vid)
+          print("Shorts URL:  https://www.youtube.com/shorts/" + vid)
+          PYEOF
+        env:
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          YT_CLIENT_ID:     ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          TIMESTAMP:        ${{ env.TIMESTAMP }}
+
+      - name: Save video as downloadable artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cosmix-recording-${{ env.TIMESTAMP }}
+          path: /tmp/cosmix_*.mp4
+          retention-days: 7
