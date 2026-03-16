@@ -715,9 +715,15 @@ function analyzeMusic(){
   });
 }
 
-// ── SFX Playback ──────────────────────────────────────
+// ── SFX Playback — max 3s per sound, max 6 simultaneous ──────
+const MAX_SFX_NODES = 6;
+const SFX_MAX_DUR   = 3.0; // hard cap seconds
+let _sfxCount = 0;
+
 function playSFX(type,x,y,size){
   if(!CFG.sfxOn||!AC) return;
+  // Limit simultaneous sounds to avoid mess
+  if(_sfxCount >= MAX_SFX_NODES) return;
   try{
     resumeAC();
     const now=AC.currentTime;
@@ -725,10 +731,17 @@ function playSFX(type,x,y,size){
     const wvol=parseInt(document.getElementById('r-wvol').value)/100;
     const vol=distVol(x,y)*(type==='whoosh'?wvol:evol);
     if(vol<0.02) return;
+
     const panner=make3DPanner(x,y);
     const gNode=AC.createGain(); gNode.gain.value=vol;
     gNode.connect(panner);
     if(panner!==masterGain) panner.connect(masterGain);
+
+    _sfxCount++;
+    // Auto-release after max duration no matter what
+    const releaseAt = now + SFX_MAX_DUR;
+    gNode.gain.setTargetAtTime(0, releaseAt - 0.05, 0.05);
+    setTimeout(()=>{ _sfxCount=Math.max(0,_sfxCount-1); }, SFX_MAX_DUR*1000+100);
 
     // Pick buffer key
     let bkey=null;
@@ -740,40 +753,38 @@ function playSFX(type,x,y,size){
     if(bkey&&BUF[bkey]){
       const src=AC.createBufferSource();
       src.buffer=BUF[bkey];
-      src.playbackRate.value=0.82+Math.random()*0.36; // pitch variation
-      src.connect(gNode); src.start(now);
+      // Clamp buffer playback so it never exceeds 3s
+      src.playbackRate.value=0.82+Math.random()*0.36;
+      src.connect(gNode);
+      src.start(now);
+      src.stop(Math.min(now + SFX_MAX_DUR, now + BUF[bkey].duration));
+      src.onended=()=>{ _sfxCount=Math.max(0,_sfxCount-1); };
     } else {
       _synthSFX(type,size,gNode,now);
     }
-  }catch(e){}
+  }catch(e){ _sfxCount=Math.max(0,_sfxCount-1); }
 }
 
+// All durations capped at SFX_MAX_DUR (3s)
 function _synthSFX(type,size,dest,now){
   const osc=AC.createOscillator(), g=AC.createGain();
   osc.connect(g); g.connect(dest);
 
-  // Noise burst for all explosions (not just big ones)
   if(type==='explode'||type==='collide'){
     try{
-      const dur=0.3+Math.random()*0.2;
+      const dur=Math.min(0.5, 0.3+Math.random()*0.2);
       const bsz=Math.floor(AC.sampleRate*dur);
       const nb=AC.createBuffer(1,bsz,AC.sampleRate);
       const nd=nb.getChannelData(0);
       for(let i=0;i<bsz;i++) nd[i]=(Math.random()*2-1)*Math.pow(1-i/bsz,1.5);
       const ns=AC.createBufferSource(); ns.buffer=nb;
       const ng=AC.createGain(), nf=AC.createBiquadFilter();
-      nf.type='bandpass';
-      nf.frequency.value=100+Math.random()*200;
-      nf.Q.value=0.4;
+      nf.type='bandpass'; nf.frequency.value=100+Math.random()*200; nf.Q.value=0.4;
       ns.connect(nf); nf.connect(ng); ng.connect(dest);
       ng.gain.setValueAtTime(0.7,now);
       ng.gain.exponentialRampToValueAtTime(0.0001,now+dur);
       ns.start(now); ns.stop(now+dur);
     }catch(e){}
-  }
-
-  if(type==='explode'||type==='collide'){
-    // Pitch varies by size — big meteor = deep boom, small = higher crack
     const base=size?Math.max(60,700-size*40):500;
     osc.type='sawtooth';
     osc.frequency.setValueAtTime(base+Math.random()*200,now);
@@ -791,7 +802,6 @@ function _synthSFX(type,size,dest,now){
     osc.start(now); osc.stop(now+.18);
 
   } else if(type==='touch'){
-    // Soft sparkle sound
     osc.type='sine';
     osc.frequency.setValueAtTime(800+Math.random()*400,now);
     osc.frequency.exponentialRampToValueAtTime(200,now+.3);
@@ -800,7 +810,6 @@ function _synthSFX(type,size,dest,now){
     osc.start(now); osc.stop(now+.3);
 
   } else if(type==='whoosh'){
-    // One-shot whoosh crack for meteor spawn
     osc.type='sawtooth';
     osc.frequency.setValueAtTime(1200+Math.random()*600,now);
     osc.frequency.exponentialRampToValueAtTime(80,now+.25);
@@ -1550,6 +1559,9 @@ PALETTE.forEach((c,idx)=>{
 });
 
 // ── FIRST-INTERACTION HANDLER ──────────────────────────
+// ── SET TO true TO ENABLE BG MUSIC (folder → CDN → piano synth) ──
+const ENABLE_BG_MUSIC = false;
+
 let audioStarted=false;
 function onFirstInteraction(){
   if(audioStarted) return;
@@ -1557,7 +1569,7 @@ function onFirstInteraction(){
   ensureAC();resumeAC();
   startHum();
   initSFX();
-  initBGMusic();
+  if(ENABLE_BG_MUSIC) initBGMusic();
 }
 
 // Restore gallery
